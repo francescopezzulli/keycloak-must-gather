@@ -59,12 +59,15 @@ while read -r API_GROUP APIRESOURCE API_PLURAL_NAME; do
     oc get "${APIRESOURCE}" -o=yaml >"${LOGS_DIR}/cluster-scoped-resources/${API_GROUP}/${API_PLURAL_NAME}.yaml"
 done
 
-# Gather RHBK-related cluster roles and cluster role bindings
+# Gather RHBK-related cluster roles and cluster role bindings (separately to avoid v1.List)
 echo "gather_keycloak:$LINENO] collecting RHBK-related clusterroles and clusterrolebindings .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
 mkdir -p "${LOGS_DIR}/cluster-scoped-resources/rbac.authorization.k8s.io"
-oc get clusterroles,clusterrolebindings -o json 2>/dev/null | \
+oc get clusterroles -o json 2>/dev/null | \
     jq '.items |= map(select(.metadata.name | test("keycloak|rhbk")))' \
-    > "${LOGS_DIR}/cluster-scoped-resources/rbac.authorization.k8s.io/clusterroles-clusterrolebindings.json" || true
+    > "${LOGS_DIR}/cluster-scoped-resources/rbac.authorization.k8s.io/clusterroles.json" || true
+oc get clusterrolebindings -o json 2>/dev/null | \
+    jq '.items |= map(select(.metadata.name | test("keycloak|rhbk")))' \
+    > "${LOGS_DIR}/cluster-scoped-resources/rbac.authorization.k8s.io/clusterrolebindings.json" || true
 
 # Inspecting operator namespace and namespaces containing Keycloak instances
 echo "gather_keycloak:$LINENO] inspecting Keycloak operator and instance namespaces .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
@@ -88,18 +91,21 @@ readarray -t UNIQUE_NAMESPACES < <(printf "%s\n" "${ALL_NAMESPACES[@]}" | sort -
 for NAMESPACE in "${UNIQUE_NAMESPACES[@]}"; do
     echo "gather_keycloak:$LINENO] collecting resources in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
 
-    # Collect namespace definition
+    # Collect namespace definition using standard structure for omc compatibility
     mkdir -p "${LOGS_DIR}/namespaces/${NAMESPACE}"
     oc get namespace "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/${NAMESPACE}.json" 2>/dev/null || true
 
-    # Collect roles and rolebindings
+    # Collect roles and rolebindings separately (not together) to avoid creating v1.List
     mkdir -p "${LOGS_DIR}/namespaces/${NAMESPACE}/rbac.authorization.k8s.io"
-    oc get roles,rolebindings -n "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/rbac.authorization.k8s.io/roles-rolebindings.json" 2>/dev/null || true
+    oc get roles -n "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/rbac.authorization.k8s.io/roles.json" 2>/dev/null || true
+    oc get rolebindings -n "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/rbac.authorization.k8s.io/rolebindings.json" 2>/dev/null || true
 
-    # Collect operator resources (CSV, subscriptions, install plans)
+    # Collect operator resources separately (not together) to avoid creating v1.List
     echo "gather_keycloak:$LINENO] collecting operator resources for namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
     mkdir -p "${LOGS_DIR}/namespaces/${NAMESPACE}/operators.coreos.com"
-    oc get clusterserviceversions,installplans,subscriptions -n "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/operators.coreos.com/operator-resources.json" 2>/dev/null || true
+    oc get clusterserviceversions -n "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/operators.coreos.com/clusterserviceversions.json" 2>/dev/null || true
+    oc get installplans -n "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/operators.coreos.com/installplans.json" 2>/dev/null || true
+    oc get subscriptions -n "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/operators.coreos.com/subscriptions.json" 2>/dev/null || true
 
     # Gather RHBK-related ConfigMaps (keycloak, rhbk, postgres, database related)
     echo "gather_keycloak:$LINENO] collecting RHBK-related configmaps in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
@@ -193,10 +199,9 @@ for NAMESPACE in "${UNIQUE_NAMESPACES[@]}"; do
         fi
     done
 
-    # Collect namespace events (Warning and Error) - save as namespace-events.json to avoid event filter page conflicts
-    echo "gather_keycloak:$LINENO] collecting events in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-    oc get events -n "$NAMESPACE" --ignore-not-found --field-selector type!=Normal -o json \
-        > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/namespace-events.json" 2>/dev/null || true
+    # Collect namespace events (Warning and Error) - skip to avoid event filter page issues
+    # Events will be in pod describe output anyway
+    # echo "gather_keycloak:$LINENO] skipping event collection to avoid conflicts .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
 done
 
 # Gather RHBK-related StatefulSets across Keycloak namespaces
