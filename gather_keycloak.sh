@@ -28,17 +28,11 @@ else
 fi
 
 # Gathering cluster version and all CRDs related to operators.coreos.com and keycloak.org
-echo "gather_keycloak:$LINENO] collecting CRDs, clusterversion .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-mkdir -p "${LOGS_DIR}/cluster-scoped-resources/apiextensions.k8s.io"
-mkdir -p "${LOGS_DIR}/cluster-scoped-resources/config.openshift.io"
-
-# Collect Keycloak and OLM CRDs
-oc get crd -o json 2>/dev/null | \
-    jq '.items |= map(select(.metadata.name | test("keycloak.org|operators.coreos.com")))' \
-    > "${LOGS_DIR}/cluster-scoped-resources/apiextensions.k8s.io/customresourcedefinitions.json" || true
-
-# Collect cluster version
-oc get clusterversion/version -o json > "${LOGS_DIR}/cluster-scoped-resources/config.openshift.io/clusterversion.json" 2>/dev/null || true
+echo "gather_keycloak:$LINENO] inspecting CRDs, clusterversion .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
+readarray -t KEYCLOAK_CRDS < <(oc get crd -o name | grep -Ei "keycloak.org|operators.coreos.com" || true)
+if [ "${#KEYCLOAK_CRDS[@]}" -gt 0 ]; then
+    oc adm inspect --dest-dir="${LOGS_DIR}" "${KEYCLOAK_CRDS[@]}" clusterversion/version > /dev/null 2>&1 || true
+fi
 
 # Gathering all namespaced custom resources across the cluster that contain "keycloak.org"
 oc get crd -o json | jq -r '.items[] | select((.spec.group | contains("keycloak.org")) and .spec.scope=="Namespaced") | .spec.group + " " + .metadata.name + " " + .spec.names.plural' |
@@ -59,15 +53,13 @@ while read -r API_GROUP APIRESOURCE API_PLURAL_NAME; do
     oc get "${APIRESOURCE}" -o=yaml >"${LOGS_DIR}/cluster-scoped-resources/${API_GROUP}/${API_PLURAL_NAME}.yaml"
 done
 
-# Gather RHBK-related cluster roles and cluster role bindings (separately to avoid v1.List)
-echo "gather_keycloak:$LINENO] collecting RHBK-related clusterroles and clusterrolebindings .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-mkdir -p "${LOGS_DIR}/cluster-scoped-resources/rbac.authorization.k8s.io"
-oc get clusterroles -o json 2>/dev/null | \
-    jq '.items |= map(select(.metadata.name | test("keycloak|rhbk")))' \
-    > "${LOGS_DIR}/cluster-scoped-resources/rbac.authorization.k8s.io/clusterroles.json" || true
-oc get clusterrolebindings -o json 2>/dev/null | \
-    jq '.items |= map(select(.metadata.name | test("keycloak|rhbk")))' \
-    > "${LOGS_DIR}/cluster-scoped-resources/rbac.authorization.k8s.io/clusterrolebindings.json" || true
+# Gather RHBK-related cluster roles and cluster role bindings
+echo "gather_keycloak:$LINENO] inspecting RHBK-related clusterroles and clusterrolebindings .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
+readarray -t RHBK_CLUSTERROLES < <(oc get clusterrole -o name | grep -Ei "keycloak|rhbk" || true)
+readarray -t RHBK_CLUSTERROLEBINDINGS < <(oc get clusterrolebinding -o name | grep -Ei "keycloak|rhbk" || true)
+if [ "${#RHBK_CLUSTERROLES[@]}" -gt 0 ] || [ "${#RHBK_CLUSTERROLEBINDINGS[@]}" -gt 0 ]; then
+    oc adm inspect --dest-dir="${LOGS_DIR}" "${RHBK_CLUSTERROLES[@]}" "${RHBK_CLUSTERROLEBINDINGS[@]}" > /dev/null 2>&1 || true
+fi
 
 # Inspecting operator namespace and namespaces containing Keycloak instances
 echo "gather_keycloak:$LINENO] inspecting Keycloak operator and instance namespaces .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
@@ -89,169 +81,26 @@ readarray -t UNIQUE_NAMESPACES < <(printf "%s\n" "${ALL_NAMESPACES[@]}" | sort -
 
 # Inspect each namespace
 for NAMESPACE in "${UNIQUE_NAMESPACES[@]}"; do
-    echo "gather_keycloak:$LINENO] collecting resources in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
+    echo "gather_keycloak:$LINENO] inspecting namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
 
-    # Collect namespace definition using standard structure for omc compatibility
-    mkdir -p "${LOGS_DIR}/namespaces/${NAMESPACE}"
-    oc get namespace "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/${NAMESPACE}.json" 2>/dev/null || true
+    # Use oc adm inspect for the namespace - this creates the proper structure for omc
+    oc adm inspect --dest-dir="${LOGS_DIR}" "ns/$NAMESPACE" > /dev/null 2>&1 || true
 
-    # Collect roles and rolebindings separately (not together) to avoid creating v1.List
-    mkdir -p "${LOGS_DIR}/namespaces/${NAMESPACE}/rbac.authorization.k8s.io"
-    oc get roles -n "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/rbac.authorization.k8s.io/roles.json" 2>/dev/null || true
-    oc get rolebindings -n "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/rbac.authorization.k8s.io/rolebindings.json" 2>/dev/null || true
-
-    # Collect operator resources separately (not together) to avoid creating v1.List
-    echo "gather_keycloak:$LINENO] collecting operator resources for namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-    mkdir -p "${LOGS_DIR}/namespaces/${NAMESPACE}/operators.coreos.com"
-    oc get clusterserviceversions -n "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/operators.coreos.com/clusterserviceversions.json" 2>/dev/null || true
-    oc get installplans -n "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/operators.coreos.com/installplans.json" 2>/dev/null || true
-    oc get subscriptions -n "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/operators.coreos.com/subscriptions.json" 2>/dev/null || true
-
-    # Gather RHBK-related ConfigMaps (keycloak, rhbk, postgres, database related)
-    echo "gather_keycloak:$LINENO] collecting RHBK-related configmaps in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-    mkdir -p "${LOGS_DIR}/namespaces/${NAMESPACE}/core"
-    oc get configmaps -n "$NAMESPACE" --ignore-not-found -o json 2>/dev/null | \
-        jq '.items |= map(select(.metadata.name | test("keycloak|rhbk|postgres|database"; "i")))' | \
-        jq 'del(.items[] | select(.metadata.name == "kube-root-ca.crt" or .metadata.name == "openshift-service-ca.crt"))' \
-        > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/configmaps.json" || true
-
-    # Gather RHBK-related Secrets metadata only (no actual secret data for security)
-    echo "gather_keycloak:$LINENO] collecting RHBK-related secrets metadata in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-    oc get secrets -n "$NAMESPACE" --ignore-not-found -o json 2>/dev/null | \
-        jq '.items |= map(select(.metadata.name | test("keycloak|rhbk|postgres|database|credential|admin"; "i")))' | \
-        jq 'del(.items[].data, .items[].stringData) | .items[] |= . + {data: "REDACTED", stringData: "REDACTED"}' \
-        > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/secrets-metadata.json" || true
-
-    # Gather RHBK-related Services
-    echo "gather_keycloak:$LINENO] collecting RHBK-related services in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-    oc get services -n "$NAMESPACE" --ignore-not-found -o json 2>/dev/null | \
-        jq '.items |= map(select(.metadata.name | test("keycloak|rhbk|postgres|database"; "i")))' \
-        > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/services.json" || true
-
-    # Gather RHBK-related Routes
-    echo "gather_keycloak:$LINENO] collecting RHBK-related routes in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-    oc get routes -n "$NAMESPACE" --ignore-not-found -o json 2>/dev/null | \
-        jq '.items |= map(select(.metadata.name | test("keycloak|rhbk"; "i")))' \
-        > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/routes.json" || true
-
-    # Gather RHBK-related Ingresses
-    echo "gather_keycloak:$LINENO] collecting RHBK-related ingresses in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-    oc get ingresses -n "$NAMESPACE" --ignore-not-found -o json 2>/dev/null | \
-        jq '.items |= map(select(.metadata.name | test("keycloak|rhbk"; "i")))' \
-        > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/ingresses.json" || true
-
-    # Gather RHBK-related PVCs (postgres, database, keycloak)
-    echo "gather_keycloak:$LINENO] collecting RHBK-related pvcs in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-    oc get pvc -n "$NAMESPACE" --ignore-not-found -o json 2>/dev/null | \
-        jq '.items |= map(select(.metadata.name | test("keycloak|rhbk|postgres|database"; "i")))' \
-        > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/pvcs.json" || true
-
-    # Gather pod logs for RHBK-related pods only
+    # Collect pod logs for RHBK-related pods
     echo "gather_keycloak:$LINENO] collecting RHBK-related pod logs in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
     mkdir -p "${LOGS_DIR}/namespaces/${NAMESPACE}/logs"
 
-    # Get RHBK-related pods (keycloak, rhbk-operator, postgres/database pods)
-    readarray -t PODS < <(oc get pods -n "$NAMESPACE" --ignore-not-found -o json | \
+    readarray -t RHBK_PODS < <(oc get pods -n "$NAMESPACE" --ignore-not-found -o json | \
         jq -r '.items[] | select(.metadata.name | test("keycloak|rhbk|postgres|database"; "i")) | .metadata.name')
-    for POD in "${PODS[@]}"; do
+
+    for POD in "${RHBK_PODS[@]}"; do
         if [ -n "$POD" ]; then
-            # Get current logs
             oc logs -n "$NAMESPACE" "$POD" --all-containers=true --ignore-errors=true \
                 > "${LOGS_DIR}/namespaces/${NAMESPACE}/logs/${POD}.log" 2>&1 || true
-
-            # Get previous logs if pod has restarted
             oc logs -n "$NAMESPACE" "$POD" --previous --all-containers=true --ignore-errors=true \
                 > "${LOGS_DIR}/namespaces/${NAMESPACE}/logs/${POD}-previous.log" 2>&1 || true
         fi
     done
-
-    # Gather RHBK-related Pods definition
-    echo "gather_keycloak:$LINENO] collecting RHBK-related pods in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-    oc get pods -n "$NAMESPACE" --ignore-not-found -o json 2>/dev/null | \
-        jq '.items |= map(select(.metadata.name | test("keycloak|rhbk|postgres|database"; "i")))' \
-        > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/pods.json" || true
-
-    # Gather RHBK-related ServiceAccounts
-    echo "gather_keycloak:$LINENO] collecting RHBK-related serviceaccounts in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-    oc get serviceaccounts -n "$NAMESPACE" --ignore-not-found -o json 2>/dev/null | \
-        jq '.items |= map(select(.metadata.name | test("keycloak|rhbk|postgres|database"; "i")))' \
-        > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/serviceaccounts.json" || true
-
-    # Gather NetworkPolicies
-    echo "gather_keycloak:$LINENO] collecting networkpolicies in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-    oc get networkpolicies -n "$NAMESPACE" --ignore-not-found -o json \
-        > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/networkpolicies.json" 2>/dev/null || true
-
-    # Gather PodDisruptionBudgets
-    echo "gather_keycloak:$LINENO] collecting poddisruptionbudgets in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-    oc get poddisruptionbudgets -n "$NAMESPACE" --ignore-not-found -o json \
-        > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/poddisruptionbudgets.json" 2>/dev/null || true
-
-    # Gather detailed describe output for RHBK pods
-    echo "gather_keycloak:$LINENO] describing RHBK-related pods in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-    mkdir -p "${LOGS_DIR}/namespaces/${NAMESPACE}/describe"
-    readarray -t DESCRIBE_PODS < <(oc get pods -n "$NAMESPACE" --ignore-not-found -o json | \
-        jq -r '.items[] | select(.metadata.name | test("keycloak|rhbk|postgres|database"; "i")) | .metadata.name')
-    for POD in "${DESCRIBE_PODS[@]}"; do
-        if [ -n "$POD" ]; then
-            oc describe pod -n "$NAMESPACE" "$POD" \
-                > "${LOGS_DIR}/namespaces/${NAMESPACE}/describe/${POD}.txt" 2>&1 || true
-        fi
-    done
-
-    # Collect namespace events (Warning and Error) - skip to avoid event filter page issues
-    # Events will be in pod describe output anyway
-    # echo "gather_keycloak:$LINENO] skipping event collection to avoid conflicts .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
 done
-
-# Gather RHBK-related StatefulSets across Keycloak namespaces
-echo "gather_keycloak:$LINENO] collecting RHBK-related StatefulSets .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-for NAMESPACE in "${UNIQUE_NAMESPACES[@]}"; do
-    oc get statefulsets -n "$NAMESPACE" --ignore-not-found -o json 2>/dev/null | \
-        jq '.items |= map(select(.metadata.name | test("keycloak|rhbk|postgres|database"; "i")))' \
-        > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/statefulsets.json" || true
-done
-
-# Gather RHBK-related Deployments across Keycloak namespaces
-echo "gather_keycloak:$LINENO] collecting RHBK-related Deployments .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-for NAMESPACE in "${UNIQUE_NAMESPACES[@]}"; do
-    oc get deployments -n "$NAMESPACE" --ignore-not-found -o json 2>/dev/null | \
-        jq '.items |= map(select(.metadata.name | test("keycloak|rhbk|postgres|database"; "i")))' \
-        > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/deployments.json" || true
-done
-
-# Gather RHBK-related ReplicaSets across Keycloak namespaces
-echo "gather_keycloak:$LINENO] collecting RHBK-related ReplicaSets .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-for NAMESPACE in "${UNIQUE_NAMESPACES[@]}"; do
-    oc get replicasets -n "$NAMESPACE" --ignore-not-found -o json 2>/dev/null | \
-        jq '.items |= map(select(.metadata.name | test("keycloak|rhbk|postgres|database"; "i")))' \
-        > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/replicasets.json" || true
-done
-
-# Gather cluster-level resources useful for troubleshooting
-echo "gather_keycloak:$LINENO] collecting cluster-level resources .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-mkdir -p "${LOGS_DIR}/cluster-scoped-resources/storage"
-mkdir -p "${LOGS_DIR}/cluster-scoped-resources/nodes"
-
-# Gather StorageClasses (useful for PVC troubleshooting)
-echo "gather_keycloak:$LINENO] collecting storageclasses .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-oc get storageclasses --ignore-not-found -o json \
-    > "${LOGS_DIR}/cluster-scoped-resources/storage/storageclasses.json" 2>/dev/null || true
-
-# Gather PersistentVolumes related to RHBK
-echo "gather_keycloak:$LINENO] collecting RHBK-related persistentvolumes .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-oc get pv --ignore-not-found -o json 2>/dev/null | \
-    jq '.items |= map(select(.spec.claimRef.name | test("keycloak|rhbk|postgres|database"; "i")))' \
-    > "${LOGS_DIR}/cluster-scoped-resources/storage/persistentvolumes.json" || true
-
-# Gather Node information (for scheduling/resource issues)
-echo "gather_keycloak:$LINENO] collecting node information .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-oc get nodes --ignore-not-found -o json \
-    > "${LOGS_DIR}/cluster-scoped-resources/nodes/nodes.json" 2>/dev/null || true
-
-# Gather all operators status (helps understand operator health)
-echo "gather_keycloak:$LINENO] collecting all operators status .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-oc get operators --ignore-not-found -A -o json \
-    > "${LOGS_DIR}/cluster-scoped-resources/operators.json" 2>/dev/null || true
 
 echo "gather_keycloak:$LINENO] must-gather collection complete!" | tee -a "${LOGS_DIR}/gather_keycloak.log"
