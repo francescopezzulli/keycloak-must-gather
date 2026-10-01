@@ -11,7 +11,7 @@ The `oc adm must-gather` command is a diagnostic tool that collects information 
 Run the following command to gather diagnostic data:
 
 ```sh
-oc adm must-gather --image=quay.io/keycloak/keycloak-must-gather:latest
+oc adm must-gather --image=quay.io/fpezzull/keycloak-must-gather:latest
 ```
 
 For Red Hat customers using RHBK, you may use the official Red Hat registry image once available:
