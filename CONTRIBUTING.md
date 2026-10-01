@@ -55,10 +55,10 @@ Before submitting a pull request:
    ```
 
 4. **Check for common issues:**
-   - Ensure secrets are properly redacted (no actual secret values in output)
-   - Verify logs are collected from all relevant pods
+   - Verify logs are collected from RHBK-related pods (keycloak, rhbk, postgres, database)
    - Check that CRDs and custom resources are properly gathered
    - Ensure the script handles missing resources gracefully (no fatal errors)
+   - Verify that `oc adm inspect` is collecting namespace resources correctly
 
 ### What to Test
 
@@ -103,21 +103,23 @@ Test scenarios:
 
 ## Adding New Collection Features
 
-When adding new resource types to collect:
+The must-gather tool primarily uses `oc adm inspect` for comprehensive resource collection. When adding new features:
 
-1. **Consider security:** Ensure sensitive data (passwords, tokens, keys) is redacted
-2. **Handle missing resources:** Use `--ignore-not-found` to avoid errors when resources don't exist
-3. **Log collection progress:** Add echo statements to track collection progress
-4. **Organize output:** Place resources in appropriate directories following the existing structure
+1. **Leverage `oc adm inspect`:** Most namespace-scoped resources are automatically collected by `oc adm inspect ns/<namespace>`
+2. **Add custom collection only when needed:** For resources requiring special filtering or processing (like RHBK-specific pod logs)
+3. **Handle missing resources:** Use `--ignore-not-found` and `|| true` to avoid errors when resources don't exist
+4. **Log collection progress:** Add echo statements to track collection progress
 5. **Update README:** Document what new data is being collected
 
-### Example: Adding a New Resource Type
+### Example: Adding Custom Resource Collection
 
 ```bash
-# In gather_keycloak.sh
-echo "gather_keycloak:$LINENO] collecting new-resource in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-oc get new-resource -n "$NAMESPACE" --ignore-not-found -o yaml \
-    > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/new-resource.yaml" 2>/dev/null || true
+# In gather_keycloak.sh - only when oc adm inspect doesn't suffice
+echo "gather_keycloak:$LINENO] collecting custom-resource .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
+readarray -t CUSTOM_RESOURCES < <(oc get custom-resource -A --ignore-not-found -o name | grep "pattern" || true)
+if [ "${#CUSTOM_RESOURCES[@]}" -gt 0 ]; then
+    oc adm inspect --dest-dir="${LOGS_DIR}" "${CUSTOM_RESOURCES[@]}" > /dev/null 2>&1 || true
+fi
 ```
 
 ## Reporting Issues

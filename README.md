@@ -26,51 +26,41 @@ The command will create a local directory with a dump of the Keycloak/RHBK state
 
 This must-gather tool collects:
 
-- **Operator Information**:
-  - Keycloak/RHBK operator subscription details
-  - ClusterServiceVersion (CSV) information
-  - InstallPlans
-  - Operator logs
-
 - **Keycloak Custom Resources**:
-  - All Keycloak CRDs (CustomResourceDefinitions) related to `keycloak.org`
+  - All Keycloak CRDs (CustomResourceDefinitions) related to `keycloak.org` and `operators.coreos.com`
   - Keycloak CR instances (both `k8s.keycloak.org` and `keycloak.org` API groups)
   - KeycloakRealmImport resources
-  - All other Keycloak-related custom resources
+  - All other Keycloak-related custom resources (both namespaced and cluster-scoped)
 
-- **Namespace Resources**:
-  - All resources in namespaces where Keycloak operator is installed
-  - All resources in namespaces where Keycloak instances are deployed
-  - ConfigMaps (excluding default system ConfigMaps)
-  - Secrets metadata (actual secret values are REDACTED for security)
-  - Services
-  - Routes (OpenShift)
-  - Ingresses (Kubernetes)
-  - PersistentVolumeClaims
+- **RBAC Resources**:
+  - Keycloak/RHBK-related ClusterRoles and ClusterRoleBindings
 
-- **Workload Resources**:
-  - StatefulSets
-  - Deployments
-  - ReplicaSets
-  - Pods
+- **Namespace Resources** (collected from operator and Keycloak instance namespaces):
+  - All namespace-scoped resources using `oc adm inspect`, including:
+    - Operator information (Subscriptions, ClusterServiceVersions, InstallPlans)
+    - ConfigMaps
+    - Secrets (with sensitive data automatically handled by `oc adm inspect`)
+    - Services
+    - Routes (OpenShift)
+    - Ingresses (Kubernetes)
+    - PersistentVolumeClaims
+    - Deployments
+    - StatefulSets
+    - ReplicaSets
+    - Pods
+    - Roles and RoleBindings
+    - Events
 
-- **Logs**:
-  - Current logs from all pods in Keycloak namespaces
-  - Previous logs from pods (if they have restarted)
-
-- **RBAC**:
-  - ClusterRoles and ClusterRoleBindings
-  - Roles and RoleBindings in relevant namespaces
-
-- **Events**:
-  - Warning and Error level events (Normal events are excluded to reduce noise)
+- **Pod Logs** (selectively collected from RHBK-related pods):
+  - Current logs from pods matching: keycloak, rhbk, postgres, or database
+  - Previous logs from these pods (if they have restarted)
 
 - **Cluster Information**:
   - ClusterVersion (OpenShift only)
 
 ### Security Note
 
-**Secrets**: The must-gather tool collects secrets metadata (names, types, labels, annotations) but **REDACTS** the actual secret data for security purposes. No sensitive credential data is included in the output.
+**Secrets**: The must-gather tool uses `oc adm inspect` which automatically handles secrets securely. Sensitive data in secrets is handled according to OpenShift's inspection policies.
 
 ## Output Structure
 
@@ -79,26 +69,24 @@ The must-gather creates a directory structure like:
 ```
 must-gather-output/
 ├── cluster-scoped-resources/
-│   └── <api-group>/
-│       └── <resource-plural>.yaml
+│   ├── <api-group>/
+│   │   └── <resource-plural>.yaml
+│   └── rbac.authorization.k8s.io/
+│       ├── clusterroles/
+│       └── clusterrolebindings/
 ├── namespaces/
 │   └── <namespace-name>/
 │       ├── <api-group>/
 │       │   └── <resource-plural>.yaml
-│       ├── core/
-│       │   ├── configmaps.yaml
-│       │   ├── secrets-metadata.json
-│       │   ├── services.yaml
-│       │   ├── routes.yaml
-│       │   ├── deployments.yaml
-│       │   ├── statefulsets.yaml
+│       ├── <resource-type>/
 │       │   └── ...
-│       ├── logs/
-│       │   ├── <pod-name>.log
-│       │   └── <pod-name>-previous.log
-│       └── events.yaml
+│       └── logs/
+│           ├── <rhbk-pod-name>.log
+│           └── <rhbk-pod-name>-previous.log
 └── gather_keycloak.log
 ```
+
+**Note**: The exact structure within each namespace is determined by `oc adm inspect` and may vary based on the resources present. Pod logs are collected only for RHBK-related pods (keycloak, rhbk, postgres, database).
 
 ## Development
 
