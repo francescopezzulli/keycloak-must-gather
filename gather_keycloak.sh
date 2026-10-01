@@ -28,11 +28,17 @@ else
 fi
 
 # Gathering cluster version and all CRDs related to operators.coreos.com and keycloak.org
-echo "gather_keycloak:$LINENO] inspecting CRDs, clusterversion .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-readarray -t KEYCLOAK_CRDS < <(oc get crd -o name | grep -Ei "keycloak.org|operators.coreos.com" || true)
-if [ "${#KEYCLOAK_CRDS[@]}" -gt 0 ]; then
-    oc adm inspect --dest-dir="${LOGS_DIR}" "${KEYCLOAK_CRDS[@]}" clusterversion/version > /dev/null || true # ClusterVersion resource is missing on k8s
-fi
+echo "gather_keycloak:$LINENO] collecting CRDs, clusterversion .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
+mkdir -p "${LOGS_DIR}/cluster-scoped-resources/apiextensions.k8s.io"
+mkdir -p "${LOGS_DIR}/cluster-scoped-resources/config.openshift.io"
+
+# Collect Keycloak and OLM CRDs
+oc get crd -o json 2>/dev/null | \
+    jq '.items |= map(select(.metadata.name | test("keycloak.org|operators.coreos.com")))' \
+    > "${LOGS_DIR}/cluster-scoped-resources/apiextensions.k8s.io/customresourcedefinitions.json" || true
+
+# Collect cluster version
+oc get clusterversion/version -o json > "${LOGS_DIR}/cluster-scoped-resources/config.openshift.io/clusterversion.json" 2>/dev/null || true
 
 # Gathering all namespaced custom resources across the cluster that contain "keycloak.org"
 oc get crd -o json | jq -r '.items[] | select((.spec.group | contains("keycloak.org")) and .spec.scope=="Namespaced") | .spec.group + " " + .metadata.name + " " + .spec.names.plural' |
@@ -53,9 +59,12 @@ while read -r API_GROUP APIRESOURCE API_PLURAL_NAME; do
     oc get "${APIRESOURCE}" -o=yaml >"${LOGS_DIR}/cluster-scoped-resources/${API_GROUP}/${API_PLURAL_NAME}.yaml"
 done
 
-# Gather cluster roles and cluster role bindings
-echo "gather_keycloak:$LINENO] inspecting clusterroles and clusterrolebindings .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-oc adm inspect --dest-dir="${LOGS_DIR}" clusterrole,clusterrolebinding > /dev/null
+# Gather RHBK-related cluster roles and cluster role bindings
+echo "gather_keycloak:$LINENO] collecting RHBK-related clusterroles and clusterrolebindings .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
+mkdir -p "${LOGS_DIR}/cluster-scoped-resources/rbac.authorization.k8s.io"
+oc get clusterroles,clusterrolebindings -o json 2>/dev/null | \
+    jq '.items |= map(select(.metadata.name | test("keycloak|rhbk")))' \
+    > "${LOGS_DIR}/cluster-scoped-resources/rbac.authorization.k8s.io/clusterroles-clusterrolebindings.json" || true
 
 # Inspecting operator namespace and namespaces containing Keycloak instances
 echo "gather_keycloak:$LINENO] inspecting Keycloak operator and instance namespaces .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
@@ -77,20 +86,20 @@ readarray -t UNIQUE_NAMESPACES < <(printf "%s\n" "${ALL_NAMESPACES[@]}" | sort -
 
 # Inspect each namespace
 for NAMESPACE in "${UNIQUE_NAMESPACES[@]}"; do
-    echo "gather_keycloak:$LINENO] inspecting namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
+    echo "gather_keycloak:$LINENO] collecting resources in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
 
-    # Inspect namespace and its objects
-    oc adm inspect --dest-dir="${LOGS_DIR}" "ns/$NAMESPACE" > /dev/null
+    # Collect namespace definition
+    mkdir -p "${LOGS_DIR}/namespaces/${NAMESPACE}"
+    oc get namespace "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/${NAMESPACE}.json" 2>/dev/null || true
 
-    # Inspect roles and rolebindings
-    oc adm inspect --dest-dir="${LOGS_DIR}" -n "$NAMESPACE" roles,rolebindings > /dev/null || true
+    # Collect roles and rolebindings
+    mkdir -p "${LOGS_DIR}/namespaces/${NAMESPACE}/rbac.authorization.k8s.io"
+    oc get roles,rolebindings -n "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/rbac.authorization.k8s.io/roles-rolebindings.json" 2>/dev/null || true
 
-    # Inspect operator resources (CSV, subscriptions, install plans)
-    echo "gather_keycloak:$LINENO] inspecting csv,sub,ip for namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
-    readarray -t CSVS_SUBS_IPS < <(oc get --ignore-not-found clusterserviceversions.operators.coreos.com,installplans.operators.coreos.com,subscriptions.operators.coreos.com -o name -n "$NAMESPACE" || true)
-    if [ "${#CSVS_SUBS_IPS[@]}" -gt 0 ]; then
-        oc adm inspect --dest-dir="${LOGS_DIR}" "${CSVS_SUBS_IPS[@]}" -n "$NAMESPACE" &> /dev/null || true
-    fi
+    # Collect operator resources (CSV, subscriptions, install plans)
+    echo "gather_keycloak:$LINENO] collecting operator resources for namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
+    mkdir -p "${LOGS_DIR}/namespaces/${NAMESPACE}/operators.coreos.com"
+    oc get clusterserviceversions,installplans,subscriptions -n "$NAMESPACE" -o json > "${LOGS_DIR}/namespaces/${NAMESPACE}/operators.coreos.com/operator-resources.json" 2>/dev/null || true
 
     # Gather RHBK-related ConfigMaps (keycloak, rhbk, postgres, database related)
     echo "gather_keycloak:$LINENO] collecting RHBK-related configmaps in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
@@ -184,10 +193,10 @@ for NAMESPACE in "${UNIQUE_NAMESPACES[@]}"; do
         fi
     done
 
-    # Gather Events (Warning and Error level) - use JSON to avoid EventList conversion issues
+    # Collect namespace events (Warning and Error) - save as namespace-events.json to avoid event filter page conflicts
     echo "gather_keycloak:$LINENO] collecting events in namespace $NAMESPACE .." | tee -a "${LOGS_DIR}/gather_keycloak.log"
     oc get events -n "$NAMESPACE" --ignore-not-found --field-selector type!=Normal -o json \
-        > "${LOGS_DIR}/namespaces/${NAMESPACE}/events.json" 2>/dev/null || true
+        > "${LOGS_DIR}/namespaces/${NAMESPACE}/core/namespace-events.json" 2>/dev/null || true
 done
 
 # Gather RHBK-related StatefulSets across Keycloak namespaces
