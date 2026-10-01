@@ -1,0 +1,25 @@
+# Must-gather output directories
+must-gather.local.*
+must-gather/
+
+# Build artifacts
+*.tar
+*.tar.gz
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.bak
+
+# Examples
+examples/
